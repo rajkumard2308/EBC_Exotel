@@ -5,7 +5,7 @@ import html
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-
+from main import fetch_calls_for_range
 from datetime import date, timedelta
 
 
@@ -504,41 +504,6 @@ st.caption(
 
 st.divider()
 
-
-# =====================================================
-# 6. LOAD DATA
-# =====================================================
-
-raw_df = load_calls()
-
-if raw_df.empty:
-
-    st.warning(
-        "No call records found. "
-        "Please run fetch_calls.py first."
-    )
-
-    st.stop()
-
-
-df = prepare_data(raw_df)
-
-valid_dates = df["Call Date"].dropna()
-
-if valid_dates.empty:
-
-    st.error(
-        "No valid call dates found. "
-        "Please check the DateCreated field in your CSV."
-    )
-
-    st.stop()
-
-
-min_date = valid_dates.min().date()
-max_date = valid_dates.max().date()
-
-
 # =====================================================
 # 7. SIDEBAR FILTERS
 # =====================================================
@@ -547,102 +512,91 @@ st.sidebar.title("🔎 Call Filters")
 
 st.sidebar.divider()
 
-
 # ---------------- DATE FILTER ----------------
 
 st.sidebar.subheader("📅 Date Filters")
 
+today = date.today()
+
 date_option = st.sidebar.selectbox(
     "Select Date Range",
-
     [
         "Today",
-        "Custom Date Range",
         "Last 7 Days",
         "Last 30 Days",
-        "Last 60 Days",
+        "Last 90 Days",
+        "Custom Date Range"
     ],
-
     index=0
 )
 
-
-today = date.today()
-
-
 if date_option == "Today":
-
     start_date = today
     end_date = today
 
-
 elif date_option == "Last 7 Days":
-
     start_date = today - timedelta(days=6)
     end_date = today
 
-
 elif date_option == "Last 30 Days":
-
     start_date = today - timedelta(days=29)
     end_date = today
 
-
 elif date_option == "Last 90 Days":
-
     start_date = today - timedelta(days=89)
     end_date = today
 
-
-elif date_option == "Custom Date Range":
-
-    st.sidebar.caption(
-        "Select your preferred start and end dates."
-    )
-
+else:
     custom_range = st.sidebar.date_input(
         "Choose Date Range",
-
-        value=(min_date, max_date),
-
-        min_value=min_date,
-        max_value=max_date
+        value=(today, today),
+        min_value=date(2020, 1, 1),
+        max_value=today
     )
 
     if isinstance(custom_range, (tuple, list)):
-
         if len(custom_range) == 2:
-
             start_date, end_date = custom_range
-
         elif len(custom_range) == 1:
-
-            start_date = custom_range[0]
-            end_date = custom_range[0]
-
+            start_date = end_date = custom_range[0]
         else:
-
-            start_date = min_date
-            end_date = max_date
-
+            start_date = end_date = today
     else:
-
-        start_date = custom_range
-        end_date = custom_range
-
-
-else:
-
-    start_date = min_date
-    end_date = max_date
-
+        start_date = end_date = custom_range
 
 st.sidebar.caption(
     f"Selected: {start_date} to {end_date}"
 )
 
+# Fetch directly from Exotel for the selected dates
+@st.cache_data(ttl=300, show_spinner=False)
+def get_exotel_data(start, end):
+    return fetch_calls_for_range(start, end)
 
-st.sidebar.divider()
+try:
+    with st.spinner(
+        f"Fetching Exotel calls from {start_date} to {end_date}..."
+    ):
+        raw_df = get_exotel_data(start_date, end_date)
+
+except Exception as exc:
+    st.error(f"Exotel API fetch failed: {exc}")
+    st.stop()
+
+if raw_df.empty:
+    st.warning(
+        f"No Exotel call records found from "
+        f"{start_date} to {end_date}."
+    )
+    st.stop()
+
+st.success(f"Fetched {len(raw_df):,} call records from Exotel.")
+
+df = prepare_data(raw_df)
+
+if df["Call Date"].dropna().empty:
+    st.error("No valid call dates found in the Exotel response.")
+    st.stop()
 
 
 # ---------------- CALL TYPE ----------------
