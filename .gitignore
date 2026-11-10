@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+
+# Generated Exotel data
+data/
+*.csv
+
+# IDE
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
