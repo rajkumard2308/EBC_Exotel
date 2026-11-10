@@ -1,7 +1,15 @@
 import requests
 from urllib.parse import urljoin
 
-from config import API_KEY, API_TOKEN, CALLS_URL, BASE_URL
+import streamlit as st
+
+try:
+    from config import API_KEY, API_TOKEN, CALLS_URL, BASE_URL
+except ModuleNotFoundError:
+    API_KEY = st.secrets["API_KEY"]
+    API_TOKEN = st.secrets["API_TOKEN"]
+    CALLS_URL = st.secrets["CALLS_URL"]
+    BASE_URL = st.secrets["BASE_URL"]
 
 
 class ExotelClient:
