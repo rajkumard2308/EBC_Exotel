@@ -1,5 +1,8 @@
 import re
 import html
+import io
+import zipfile
+import requests
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -183,6 +186,74 @@ def prepare_data(raw_frame):
         frame = pd.concat([identified, unidentified], ignore_index=True)
 
     return frame
+
+
+def build_recordings_zip(frame):
+    """Download every available recording URL into one in-memory ZIP archive."""
+    api_key = str(st.secrets.get("EXOTEL_API_KEY", "")).strip()
+    api_token = str(st.secrets.get("EXOTEL_API_TOKEN", "")).strip()
+    if not api_key or not api_token:
+        raise RuntimeError("EXOTEL_API_KEY / EXOTEL_API_TOKEN are missing from Streamlit secrets.")
+
+    recording_rows = frame[
+        frame["Recording URL"].fillna("").astype(str).str.startswith(("https://", "http://"))
+    ].copy()
+    if recording_rows.empty:
+        return None, 0, 0, ["No recording URLs were found for the selected date range."]
+
+    memory_file = io.BytesIO()
+    downloaded = 0
+    failed = 0
+    report = []
+    used_names = set()
+    session = requests.Session()
+    session.auth = (api_key, api_token)
+    session.headers.update({"Accept": "*/*", "User-Agent": "EBC-Exotel-Analytics"})
+
+    with zipfile.ZipFile(memory_file, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, row in recording_rows.iterrows():
+            url = str(row["Recording URL"]).strip()
+            call_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(row.get("Call ID", "call")))[:70]
+            phone = re.sub(r"[^0-9]+", "", str(row.get("Customer Number", ""))) or "unknown_number"
+            call_date = row.get("Call Date")
+            date_part = call_date.strftime("%Y%m%d_%H%M%S") if pd.notna(call_date) else f"record_{index}"
+            base_name = f"{date_part}_{phone}_{call_id or index}"
+            file_name = f"{base_name}.mp3"
+            suffix = 1
+            while file_name.lower() in used_names:
+                file_name = f"{base_name}_{suffix}.mp3"
+                suffix += 1
+            used_names.add(file_name.lower())
+
+            try:
+                response = session.get(url, timeout=(15, 90), allow_redirects=True)
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "").lower()
+                content = response.content
+                if not content or "text/html" in content_type or content.lstrip().lower().startswith((b"<!doctype html", b"<html")):
+                    raise ValueError("The URL did not return an audio file (possibly an access/login page).")
+
+                # Preserve a useful extension if Exotel provides one.
+                if "wav" in content_type or url.lower().split("?")[0].endswith(".wav"):
+                    file_name = file_name[:-4] + ".wav"
+                elif "mpeg" in content_type or "mp3" in content_type or url.lower().split("?")[0].endswith(".mp3"):
+                    pass
+                elif "ogg" in content_type:
+                    file_name = file_name[:-4] + ".ogg"
+                elif "mp4" in content_type:
+                    file_name = file_name[:-4] + ".mp4"
+
+                archive.writestr(file_name, content)
+                downloaded += 1
+                report.append(f"Downloaded: {file_name}")
+            except Exception as exc:
+                failed += 1
+                report.append(f"FAILED | {base_name} | {type(exc).__name__}: {exc}")
+
+        archive.writestr("download_report.txt", "\n".join(report))
+
+    memory_file.seek(0)
+    return memory_file.getvalue(), downloaded, failed, report
 
 
 def calculate_unique_calls(frame, selected_call_types):
@@ -466,6 +537,18 @@ if not filtered.empty:
 else:
     st.info("No duration data available.")
 
+
+# ============================================================
+# DAILY TREND
+# ============================================================
+st.markdown("#### 📅 Daily Call Trend")
+if not filtered.empty:
+    daily = filtered.assign(Day=filtered["Call Date"].dt.date).groupby("Day").size().reset_index(name="Calls")
+    fig = px.line(daily, x="Day", y="Calls", markers=True, title="Calls per Day")
+    fig.update_layout(template="plotly_dark", height=320)
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ============================================================
 # AGENT PERFORMANCE
 # ============================================================
@@ -515,6 +598,35 @@ if not filtered.empty:
         file_name=f"EBC_Exotel_Calls_{start_date}_{end_date}.csv",
         mime="text/csv",
     )
+
+    st.markdown("#### 🎧 Download Call Recordings")
+    st.caption(
+        "Creates one ZIP containing every recording available in the selected API date range "
+        "(not only the calls currently visible after sidebar filters)."
+    )
+    if st.button("📦 Prepare All Call Recordings ZIP", type="primary"):
+        try:
+            with st.spinner("Downloading call recordings and creating ZIP. This may take a few minutes..."):
+                zip_bytes, downloaded_count, failed_count, zip_report = build_recordings_zip(df)
+            if zip_bytes is None:
+                st.warning("No recording URLs were available for this date range.")
+            else:
+                st.session_state["recordings_zip_bytes"] = zip_bytes
+                st.session_state["recordings_zip_name"] = f"EBC_Call_Recordings_{start_date}_{end_date}.zip"
+                st.session_state["recordings_zip_summary"] = (downloaded_count, failed_count)
+        except Exception as exc:
+            st.error(f"Could not create recordings ZIP: {type(exc).__name__}: {exc}")
+
+    if st.session_state.get("recordings_zip_bytes"):
+        downloaded_count, failed_count = st.session_state.get("recordings_zip_summary", (0, 0))
+        st.success(f"ZIP ready: {downloaded_count} recording(s) downloaded; {failed_count} failed. See download_report.txt inside the ZIP.")
+        st.download_button(
+            "⬇️ Download All Call Recordings ZIP",
+            data=st.session_state["recordings_zip_bytes"],
+            file_name=st.session_state["recordings_zip_name"],
+            mime="application/zip",
+            key="download_all_recordings_zip",
+        )
 else:
     st.warning("No calls found for the selected filters.")
 
