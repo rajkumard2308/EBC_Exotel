@@ -39,6 +39,7 @@ class ExotelClient:
             "PageSize": 100,
             "SortBy": "DateCreated:asc",
             "details": "true",
+            "NumbersMetadata": "true",
         }
 
         url = self.calls_url

@@ -43,6 +43,7 @@ def fetch_calls_for_range(start_date, end_date):
         print(f"Fetching Exotel calls: {start} to {end}")
 
         calls = client.fetch_calls(start, end)
+
         all_calls.extend(calls)
 
         current = chunk_end + timedelta(days=1)
@@ -52,6 +53,14 @@ def fetch_calls_for_range(start_date, end_date):
 
     df = pd.DataFrame(all_calls)
 
+    print("\n========== EXOTEL CIRCLE DEBUG ==========")
+    print("Available columns:")
+    print(df.columns.tolist())
+
+    for col in df.columns:
+        if "circle" in col.lower():
+            print(f"\n{col} values:")
+            print(df[col].dropna().unique()[:20])
     if "Sid" in df.columns:
         df = df.drop_duplicates(subset=["Sid"], keep="last")
 

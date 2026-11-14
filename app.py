@@ -1,4 +1,5 @@
 import re
+import ast
 import html
 import io
 import zipfile
@@ -141,6 +142,23 @@ def classify_status(value):
     }
     return mapping.get(value, value.title() if value else "Unknown")
 
+def extract_circle(metadata, side):
+    if pd.isna(metadata):
+        return ""
+
+    try:
+        if isinstance(metadata, str):
+            metadata = ast.literal_eval(metadata)
+
+        if not isinstance(metadata, dict):
+            return ""
+
+        return str(
+            metadata.get(side, {}).get("Region", "")
+        ).strip()
+
+    except (ValueError, SyntaxError, AttributeError, TypeError):
+        return ""
 
 def prepare_data(raw_frame):
     """Map Exotel's raw call fields into consistent dashboard columns."""
@@ -158,6 +176,15 @@ def prepare_data(raw_frame):
     sid_col = find_column(frame, ["Sid", "CallSid", "Call SID", "CallId", "Call ID"])
     agent_col = find_column(frame, ["Agent", "AgentName", "Agent Name", "UserName", "Legs"])
     recording_col = find_column(frame, ["RecordingUrl", "RecordingURL", "Recording", "Recording Url"])
+    from_circle_col = find_column(
+        frame, ["FromCircle", "From Circle", "From_Circle"]
+    )
+
+    to_circle_col = find_column(
+        frame, ["ToCircle", "To Circle", "To_Circle"]
+    )
+
+    metadata_col = find_column(frame, ["NumbersMetadata"])
 
     frame["Call Type"] = frame[direction_col].apply(classify_direction) if direction_col else "Unknown"
     frame["Call Status"] = frame[status_col].apply(classify_status) if status_col else "Unknown"
@@ -176,6 +203,26 @@ def prepare_data(raw_frame):
     frame["Call ID"] = frame[sid_col].apply(clean_text) if sid_col else ""
     frame["Agent"] = frame[agent_col].apply(lambda x: clean_text(x, "Unknown")) if agent_col else "Not Available"
     frame["Recording URL"] = frame[recording_col].apply(clean_text) if recording_col else ""
+    # Extract Circle values from Exotel NumbersMetadata
+    if metadata_col:
+        frame["From Circle"] = frame[metadata_col].apply(
+            lambda x: extract_circle(x, "From")
+        )
+
+        frame["To Circle"] = frame[metadata_col].apply(
+            lambda x: extract_circle(x, "To")
+        )
+
+    else:
+        frame["From Circle"] = (
+            frame[from_circle_col].apply(clean_text)
+            if from_circle_col else ""
+        )
+
+        frame["To Circle"] = (
+            frame[to_circle_col].apply(clean_text)
+            if to_circle_col else ""
+        )
     frame["Connected"] = frame["Call Status"].eq("Answered")
 
     # Remove duplicate Exotel call SIDs, while retaining records without a SID.
@@ -217,7 +264,8 @@ def build_recordings_zip(frame):
             phone = re.sub(r"[^0-9]+", "", str(row.get("Customer Number", ""))) or "unknown_number"
             call_date = row.get("Call Date")
             date_part = call_date.strftime("%Y%m%d_%H%M%S") if pd.notna(call_date) else f"record_{index}"
-            base_name = f"{date_part}_{phone}_{call_id or index}"
+            direction = re.sub(r"[^A-Za-z0-9_-]+", "_", str(row.get("Call Type", "Call")))
+            base_name = f"{date_part}_{direction}_{phone}_{call_id or index}"
             file_name = f"{base_name}.mp3"
             suffix = 1
             while file_name.lower() in used_names:
@@ -386,6 +434,36 @@ except Exception as exc:
     st.info("Check .streamlit/secrets.toml and the Exotel API credentials.")
     st.stop()
 
+# TEMPORARY DEBUG: inspect circle metadata from Exotel
+def find_circle_fields(obj, path=""):
+    results = {}
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            current_path = f"{path}.{key}" if path else key
+
+            if "circle" in str(key).lower():
+                results[current_path] = str(value)[:150]
+
+            if isinstance(value, (dict, list)):
+                results.update(find_circle_fields(value, current_path))
+
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj[:5]):
+            results.update(find_circle_fields(value, f"{path}[{index}]"))
+
+    return results
+
+print("API columns:", list(raw_df.columns))
+
+debug_results = []
+
+for _, record in raw_df.head(5).iterrows():
+    circle_data = find_circle_fields(record.to_dict())
+    debug_results.append(circle_data)
+
+print("Circle debug results:", debug_results)
+
 df = prepare_data(raw_df)
 
 if df.empty:
@@ -415,6 +493,32 @@ selected_directions = st.sidebar.multiselect(
     "Select Call Type", direction_options, default=direction_options
 )
 
+st.sidebar.caption("Choose Incoming, Outgoing, or both call directions above.")
+
+st.sidebar.subheader("📍 From Circle")
+from_circle_options = sorted(
+    value for value in df["From Circle"].dropna().astype(str).str.strip().unique()
+    if value and value.lower() not in {"nan", "none"}
+)
+selected_from_circles = st.sidebar.multiselect(
+    "Filter by From Circle",
+    from_circle_options,
+    default=from_circle_options,
+    help="Filter calls by the circle reported by Exotel for the originating number.",
+)
+
+st.sidebar.subheader("📍 To Circle")
+to_circle_options = sorted(
+    value for value in df["To Circle"].dropna().astype(str).str.strip().unique()
+    if value and value.lower() not in {"nan", "none"}
+)
+selected_to_circles = st.sidebar.multiselect(
+    "Filter by To Circle",
+    to_circle_options,
+    default=to_circle_options,
+    help="Filter calls by the circle reported by Exotel for the destination number.",
+)
+
 st.sidebar.subheader("📊 Call Status")
 status_options = sorted(df["Call Status"].dropna().unique().tolist())
 selected_status = st.sidebar.multiselect("Select Call Status", status_options, default=status_options)
@@ -439,6 +543,10 @@ search_number = st.sidebar.text_input("Search Phone Number", placeholder="Enter 
 # ============================================================
 filtered = df.copy()
 filtered = filtered[filtered["Call Type"].isin(selected_directions)]
+if from_circle_options:
+    filtered = filtered[filtered["From Circle"].isin(selected_from_circles)]
+if to_circle_options:
+    filtered = filtered[filtered["To Circle"].isin(selected_to_circles)]
 filtered = filtered[filtered["Call Status"].isin(selected_status)]
 filtered = filtered[filtered["Duration Seconds"].between(*duration_range)]
 filtered = filtered[filtered["Agent"].isin(selected_agents)]
@@ -537,18 +645,6 @@ if not filtered.empty:
 else:
     st.info("No duration data available.")
 
-
-# ============================================================
-# DAILY TREND
-# ============================================================
-st.markdown("#### 📅 Daily Call Trend")
-if not filtered.empty:
-    daily = filtered.assign(Day=filtered["Call Date"].dt.date).groupby("Day").size().reset_index(name="Calls")
-    fig = px.line(daily, x="Day", y="Calls", markers=True, title="Calls per Day")
-    fig.update_layout(template="plotly_dark", height=320)
-    st.plotly_chart(fig, use_container_width=True)
-
-
 # ============================================================
 # AGENT PERFORMANCE
 # ============================================================
@@ -585,7 +681,8 @@ st.caption(f"Showing {len(filtered):,} calls after applying filters.")
 if not filtered.empty:
     display_columns = [
         "Call ID", "Call Date", "Call Type", "Customer Number",
-        "Destination Number", "Call Status", "Duration", "Agent", "Recording URL"
+        "Destination Number", "From Circle", "To Circle",
+        "Call Status", "Duration", "Agent", "Recording URL"
     ]
     display = filtered[display_columns].sort_values("Call Date", ascending=False).copy()
     display["Call Date"] = display["Call Date"].dt.strftime("%Y-%m-%d %H:%M:%S")
